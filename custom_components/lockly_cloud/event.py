@@ -1,15 +1,21 @@
-"""Event platform for the Lockly Cloud integration."""
+"""Event platform for the Lockly Cloud integration.
+
+Fires an HA event each time the lock state changes (locked/unlocked) as
+detected by the MQTT deviceStateCallback. User identification is not
+available from this callback; a future REST API integration could enrich
+events with user details.
+"""
 
 from __future__ import annotations
 
 import logging
 
-from homeassistant.components.event import EventDeviceClass, EventEntity
+from homeassistant.components.event import EventEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from pylockly import DoorLock, UNLOCK_TYPE_NAMES
+from pylockly import DoorLock
 
 from . import LocklyConfigEntry
 from .const import DOMAIN
@@ -17,7 +23,7 @@ from .coordinator import LocklyCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-EVENT_TYPES = list(UNLOCK_TYPE_NAMES.values()) + ["lock", "unknown"]
+EVENT_TYPES = ["locked", "unlocked"]
 
 
 async def async_setup_entry(
@@ -33,11 +39,10 @@ async def async_setup_entry(
 
 
 class LocklyLockEventEntity(CoordinatorEntity[LocklyCoordinator], EventEntity):
-    """Fires an event each time the lock is operated, with user info."""
+    """Fires an event each time the lock state transitions."""
 
     _attr_has_entity_name = True
     _attr_name = "Lock event"
-    _attr_device_class = EventDeviceClass.DOORBELL
     _attr_event_types = EVENT_TYPES
 
     def __init__(
@@ -49,24 +54,18 @@ class LocklyLockEventEntity(CoordinatorEntity[LocklyCoordinator], EventEntity):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, lock.id)},
         )
-        self._last_event_id: int | None = None
+        self._last_seen: dict | None = None
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Process new lock events from the coordinator."""
-        events = self.coordinator.lock_events.get(self._lock.id, [])
-        for event in events:
-            if self._last_event_id is not None and event.event_id <= self._last_event_id:
-                continue
-            self._last_event_id = event.event_id
-            self._trigger_event(
-                event.event_type_name,
-                {
-                    "user_name": event.lock_user_name or "",
-                    "user_id": event.user_id,
-                    "method": event.event_type_name,
-                    "event_type_code": event.event_type,
-                    "time": event.time,
-                },
-            )
+        """Fire event when lock state transitions."""
+        ev = self.coordinator.last_lock_event.get(self._lock.id)
+        if ev is None or ev is self._last_seen:
+            return
+        self._last_seen = ev
+        event_type = ev.get("event_type", "unlocked")
+        self._trigger_event(
+            event_type,
+            {"timestamp": ev.get("timestamp")},
+        )
         self.async_write_ha_state()
