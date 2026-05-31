@@ -1,9 +1,8 @@
 """Event platform for the Lockly Cloud integration.
 
-Fires an HA event each time the lock state changes (locked/unlocked) as
-detected by the MQTT deviceStateCallback. User identification is not
-available from this callback; a future REST API integration could enrich
-events with user details.
+Fires an HA event each time a lock event is received, either from the
+REST event log API (with user info) or from MQTT state transitions
+(synthetic fallback). Event types map to Lockly unlock methods.
 """
 
 from __future__ import annotations
@@ -23,7 +22,21 @@ from .coordinator import LocklyCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-EVENT_TYPES = ["locked", "unlocked"]
+EVENT_TYPES = [
+    "app",
+    "keypad",
+    "guest_code",
+    "physical_key",
+    "family_code",
+    "rfid",
+    "fingerprint",
+    "one_time_code",
+    "guest_fingerprint",
+    "e_badge_unlock",
+    "e_badge_lock",
+    "locked",
+    "unlocked",
+]
 
 
 async def async_setup_entry(
@@ -39,7 +52,7 @@ async def async_setup_entry(
 
 
 class LocklyLockEventEntity(CoordinatorEntity[LocklyCoordinator], EventEntity):
-    """Fires an event each time the lock state transitions."""
+    """Fires an event each time a lock event is received."""
 
     _attr_has_entity_name = True
     _attr_name = "Lock event"
@@ -58,14 +71,20 @@ class LocklyLockEventEntity(CoordinatorEntity[LocklyCoordinator], EventEntity):
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Fire event when lock state transitions."""
+        """Fire event when a new lock event arrives."""
         ev = self.coordinator.last_lock_event.get(self._lock.id)
         if ev is None or ev is self._last_seen:
             return
         self._last_seen = ev
         event_type = ev.get("event_type", "unlocked")
-        self._trigger_event(
-            event_type,
-            {"timestamp": ev.get("timestamp")},
-        )
+        attrs: dict = {"timestamp": ev.get("timestamp")}
+
+        user_name = ev.get("user_name")
+        if user_name:
+            attrs["user_name"] = user_name
+        user_id = ev.get("user_id")
+        if user_id:
+            attrs["user_id"] = user_id
+
+        self._trigger_event(event_type, attrs)
         self.async_write_ha_state()

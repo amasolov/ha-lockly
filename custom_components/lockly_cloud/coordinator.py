@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import time as time_mod
 from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
@@ -24,6 +25,8 @@ from pylockly.ble_cmd import (
 from pylockly.exceptions import LocklyError
 
 from .const import MQTT_RECONNECT_INTERVAL, STATUS_POLL_INTERVAL
+
+EVENT_LOG_POLL_INTERVAL = 30
 
 _SUPPRESSED_CMD_ERRORS: frozenset[int] = frozenset({0xFF})
 
@@ -48,8 +51,10 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.device_states: dict[str, DeviceState] = {}
         self.last_lock_event: dict[str, dict[str, Any]] = {}
         self._prev_lock_states: dict[str, str | None] = {}
+        self._last_event_ids: dict[str, int] = {}
         self._mqtt_task: asyncio.Task[None] | None = None
         self._poll_task: asyncio.Task[None] | None = None
+        self._event_poll_task: asyncio.Task[None] | None = None
         self._command_lock = asyncio.Lock()
 
     async def async_setup(self) -> None:
@@ -79,9 +84,13 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._poll_status_loop(), "lockly_cloud_status_poll"
         )
 
+        self._event_poll_task = self.hass.async_create_background_task(
+            self._poll_event_log_loop(), "lockly_cloud_event_poll"
+        )
+
     async def async_shutdown(self) -> None:
         """Clean up connections."""
-        for task in (self._poll_task, self._mqtt_task):
+        for task in (self._poll_task, self._event_poll_task, self._mqtt_task):
             if task and not task.done():
                 task.cancel()
         await self.mqtt.disconnect()
@@ -282,12 +291,13 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _handle_device_state(self, states: list[DeviceState]) -> None:
         """Process incoming MQTT device state updates.
 
-        When the lock_state transitions (e.g. unlocked -> locked), a
-        synthetic event is stored in ``last_lock_event`` so the event
-        entity can fire. User identification is not available from
-        deviceStateCallback; that would require a REST API call to the
-        event log endpoint.
+        When the lock_state transitions (e.g. unlocked -> locked), an
+        immediate REST event log fetch is scheduled to get user details.
+        If the REST fetch fails, a synthetic event without user info is
+        stored as a fallback.
         """
+        changed_device_ids: list[str] = []
+
         for state in states:
             existing = self.device_states.get(state.device_id)
             if existing is None:
@@ -296,13 +306,7 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if state.lock_state is not None:
                     prev = self._prev_lock_states.get(state.device_id)
                     if prev is not None and prev != state.lock_state:
-                        event_type = (
-                            "lock" if state.lock_state == "locked" else "app"
-                        )
-                        self.last_lock_event[state.device_id] = {
-                            "event_type": event_type,
-                            "timestamp": state.timestamp,
-                        }
+                        changed_device_ids.append(state.device_id)
                         _LOGGER.debug(
                             "Lock state change for %s: %s -> %s",
                             state.device_id,
@@ -319,6 +323,12 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     existing.rssi = state.rssi
                 if state.timestamp is not None:
                     existing.timestamp = state.timestamp
+
+        if changed_device_ids:
+            self.hass.async_create_background_task(
+                self._fetch_events_for_devices(changed_device_ids),
+                "lockly_cloud_event_fetch",
+            )
 
         self._update_data()
 
@@ -369,6 +379,126 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return
             except Exception:
                 _LOGGER.exception("Unexpected error in status poll")
+
+    async def _fetch_events_for_devices(
+        self, device_ids: list[str]
+    ) -> None:
+        """Fetch recent events via REST for the given devices.
+
+        Waits a few seconds for the event to propagate to the server,
+        then queries the event log. Falls back to a synthetic event
+        (without user info) if the REST call fails.
+        """
+        await asyncio.sleep(5)
+
+        for device_id in device_ids:
+            try:
+                now_ms = int(time_mod.time() * 1000)
+                events = await self.api.query_event_log(
+                    device_id,
+                    start_ms=now_ms - 120_000,
+                    end_ms=now_ms,
+                    limit=5,
+                )
+                new_events = [
+                    e for e in events
+                    if e.event_id > self._last_event_ids.get(device_id, 0)
+                ]
+                if new_events:
+                    latest = max(new_events, key=lambda e: e.event_id)
+                    self._last_event_ids[device_id] = latest.event_id
+                    self.last_lock_event[device_id] = {
+                        "event_type": latest.event_type_name,
+                        "user_name": latest.lock_user_name or "",
+                        "user_id": latest.user_id,
+                        "timestamp": latest.timestamp or int(
+                            time_mod.time() * 1000
+                        ),
+                        "event_id": latest.event_id,
+                    }
+                    _LOGGER.debug(
+                        "REST event for %s: type=%s user=%s event_id=%d",
+                        device_id,
+                        latest.event_type_name,
+                        latest.lock_user_name or "unknown",
+                        latest.event_id,
+                    )
+                    self._update_data()
+                else:
+                    _LOGGER.debug(
+                        "No new REST events for %s; using synthetic", device_id
+                    )
+                    self._set_synthetic_event(device_id)
+            except Exception:
+                _LOGGER.debug(
+                    "REST event log fetch failed for %s; using synthetic",
+                    device_id,
+                    exc_info=True,
+                )
+                self._set_synthetic_event(device_id)
+
+    def _set_synthetic_event(self, device_id: str) -> None:
+        """Store a fallback event from MQTT state change (no user info)."""
+        state = self.device_states.get(device_id)
+        lock_state = state.lock_state if state else None
+        event_type = "locked" if lock_state == "locked" else "unlocked"
+        self.last_lock_event[device_id] = {
+            "event_type": event_type,
+            "user_name": "",
+            "user_id": "",
+            "timestamp": int(time_mod.time() * 1000),
+        }
+        self._update_data()
+
+    async def _poll_event_log_loop(self) -> None:
+        """Periodically poll REST event logs for all locks.
+
+        Serves as a fallback in case the MQTT state change callback
+        doesn't fire (e.g. physical key unlock that MQTT misses).
+        """
+        await asyncio.sleep(30)
+
+        while True:
+            try:
+                for lock in self.locks:
+                    now_ms = int(time_mod.time() * 1000)
+                    events = await self.api.query_event_log(
+                        lock.uuid or lock.id,
+                        start_ms=now_ms - EVENT_LOG_POLL_INTERVAL * 2 * 1000,
+                        end_ms=now_ms,
+                        limit=10,
+                    )
+                    new_events = [
+                        e for e in events
+                        if e.event_id > self._last_event_ids.get(lock.id, 0)
+                    ]
+                    if new_events:
+                        latest = max(new_events, key=lambda e: e.event_id)
+                        self._last_event_ids[lock.id] = latest.event_id
+                        self.last_lock_event[lock.id] = {
+                            "event_type": latest.event_type_name,
+                            "user_name": latest.lock_user_name or "",
+                            "user_id": latest.user_id,
+                            "timestamp": latest.timestamp or int(
+                                time_mod.time() * 1000
+                            ),
+                            "event_id": latest.event_id,
+                        }
+                        _LOGGER.debug(
+                            "Poll: new event for %s: type=%s user=%s",
+                            lock.name,
+                            latest.event_type_name,
+                            latest.lock_user_name or "unknown",
+                        )
+                        self._update_data()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                _LOGGER.debug(
+                    "Event log poll failed", exc_info=True
+                )
+
+            await asyncio.sleep(EVENT_LOG_POLL_INTERVAL)
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data (called by DataUpdateCoordinator if update_interval is set)."""
