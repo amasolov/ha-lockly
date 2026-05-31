@@ -29,6 +29,8 @@ from .const import MQTT_RECONNECT_INTERVAL, STATUS_POLL_INTERVAL
 
 EVENT_LOG_POLL_INTERVAL = 60
 
+_SUPPRESSED_CMD_ERRORS: frozenset[int] = frozenset({0xFF})
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -110,9 +112,17 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         1. Send QueryLockStatusCmd (opcode 1E) to obtain the random number
         2. Parse the response and extract the 16-char hex random number
         3. Build and send the lock/unlock command with the random number
+
+        The APK silently ignores certain BLE error codes on lock commands
+        (0xFF in particular has onErrorCmd empty and isShowErrorInfo=false),
+        relying on MQTT deviceStateCallback for actual state. We mirror that
+        behaviour: non-fatal errors produce a warning and optimistic state
+        update rather than raising HomeAssistantError.
         """
         if not self.mqtt.connected:
             raise HomeAssistantError("Lockly MQTT is not connected")
+
+        action_str = "lock" if do_lock else "unlock"
 
         async with self._command_lock:
             mc = lock.master_code
@@ -150,9 +160,12 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
 
             _LOGGER.debug(
-                "Got random number for %s, sending %s command",
+                "Got random number for %s (len=%d), sending %s command "
+                "(host_code len=%d, pwd_id=1)",
                 lock.name,
-                "lock" if do_lock else "unlock",
+                len(random_number),
+                action_str,
+                len(lock.host_code),
             )
 
             lock_cmd = build_lock_command(
@@ -174,13 +187,36 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if cmd_b64:
                 cmd_bytes = base64.b64decode(cmd_b64)
                 cmd_parsed = parse_ble_response(cmd_bytes, aes_key=aes_key)
+                _LOGGER.debug(
+                    "%s response for %s: cmd_type=%s is_error=%s error_code=%s",
+                    action_str,
+                    lock.name,
+                    cmd_parsed.get("cmd_type"),
+                    cmd_parsed.get("is_error"),
+                    cmd_parsed.get("error_hex", "n/a"),
+                )
                 if cmd_parsed.get("is_error"):
-                    raise HomeAssistantError(
-                        f"Lock command failed: error 0x{cmd_parsed.get('error_code', 0):02x}"
+                    err = cmd_parsed.get("error_code", 0)
+                    if err not in _SUPPRESSED_CMD_ERRORS:
+                        raise HomeAssistantError(
+                            f"Lock command failed: error 0x{err:02x}"
+                        )
+                    _LOGGER.warning(
+                        "%s command for %s returned suppressed error 0x%02x; "
+                        "optimistically updating state",
+                        action_str,
+                        lock.name,
+                        err,
                     )
 
-            action = "locked" if do_lock else "unlocked"
-            _LOGGER.info("Successfully %s %s", action, lock.name)
+            state = self.device_states.get(lock.id)
+            if state is None:
+                state = DeviceState(device_id=lock.id)
+                self.device_states[lock.id] = state
+            state.lock_state = "locked" if do_lock else "unlocked"
+            self._update_data()
+
+            _LOGGER.info("Successfully sent %s to %s", action_str, lock.name)
 
     async def _fetch_initial_states(self) -> None:
         """Query each lock via MQTT to populate initial state."""
