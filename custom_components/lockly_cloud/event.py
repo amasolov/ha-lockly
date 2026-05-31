@@ -77,6 +77,13 @@ class LocklyLockEventEntity(CoordinatorEntity[LocklyCoordinator], EventEntity):
             return
         self._last_seen = ev
         event_type = ev.get("event_type", "unlocked")
+        if event_type not in EVENT_TYPES:
+            _LOGGER.warning(
+                "Unknown event type %s for %s, falling back to unlocked",
+                event_type,
+                self._lock.id,
+            )
+            event_type = "unlocked"
         attrs: dict = {"timestamp": ev.get("timestamp")}
 
         user_name = ev.get("user_name")
@@ -86,5 +93,8 @@ class LocklyLockEventEntity(CoordinatorEntity[LocklyCoordinator], EventEntity):
         if user_id:
             attrs["user_id"] = user_id
 
+        _LOGGER.debug(
+            "Firing event %s for %s: %s", event_type, self._lock.id, attrs
+        )
         self._trigger_event(event_type, attrs)
         self.async_write_ha_state()
