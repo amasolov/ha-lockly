@@ -6,6 +6,6 @@
   "dependencies": [],
   "documentation": "https://github.com/amasolov/ha-lockly",
   "iot_class": "cloud_push",
-  "requirements": ["pylockly @ git+https://github.com/amasolov/pylockly.git@v0.2.0"],
+  "requirements": ["pylockly @ git+https://github.com/amasolov/pylockly.git@v0.2.1"],
   "version": "0.4.0"
 }
