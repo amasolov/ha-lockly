@@ -1,4 +1,4 @@
-"""The Lockly integration."""
+"""The Lockly Cloud integration."""
 
 from __future__ import annotations
 

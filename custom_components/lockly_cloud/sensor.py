@@ -1,4 +1,4 @@
-"""Sensor platform for the Lockly integration."""
+"""Sensor platform for the Lockly Cloud integration."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ class LocklyBatterySensor(CoordinatorEntity[LocklyCoordinator], SensorEntity):
     ) -> None:
         super().__init__(coordinator)
         self._lock = lock
-        self._attr_unique_id = f"lockly_{lock.id}_battery"
+        self._attr_unique_id = f"lockly_cloud_{lock.id}_battery"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, lock.id)},
         )
@@ -83,7 +83,7 @@ class LocklyRssiSensor(CoordinatorEntity[LocklyCoordinator], SensorEntity):
     ) -> None:
         super().__init__(coordinator)
         self._lock = lock
-        self._attr_unique_id = f"lockly_{lock.id}_rssi"
+        self._attr_unique_id = f"lockly_cloud_{lock.id}_rssi"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, lock.id)},
         )

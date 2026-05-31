@@ -1,4 +1,4 @@
-"""Data coordinator for the Lockly integration.
+"""Data coordinator for the Lockly Cloud integration.
 
 Manages the REST API session, MQTT connection, and device state.
 Exposes the BLE query-then-command flow for lock/unlock operations.
@@ -35,7 +35,7 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         super().__init__(
             hass,
             _LOGGER,
-            name="Lockly",
+            name="Lockly Cloud",
             update_interval=None,
         )
         self._email = email
@@ -66,7 +66,7 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._schedule_mqtt_reconnect()
 
         self._poll_task = self.hass.async_create_background_task(
-            self._poll_status_loop(), "lockly_status_poll"
+            self._poll_status_loop(), "lockly_cloud_status_poll"
         )
 
         self._update_data()
@@ -219,7 +219,7 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._schedule_mqtt_reconnect()
 
         self._mqtt_task = self.hass.async_create_background_task(
-            _reconnect(), "lockly_mqtt_reconnect"
+            _reconnect(), "lockly_cloud_mqtt_reconnect"
         )
 
     async def _poll_status_loop(self) -> None:

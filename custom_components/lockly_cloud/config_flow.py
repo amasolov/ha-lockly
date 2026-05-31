@@ -1,4 +1,4 @@
-"""Config flow for the Lockly integration."""
+"""Config flow for the Lockly Cloud integration."""
 
 from __future__ import annotations
 

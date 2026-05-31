@@ -1,8 +1,8 @@
-"""Constants for the Lockly integration."""
+"""Constants for the Lockly Cloud integration."""
 
 from homeassistant.const import Platform
 
-DOMAIN = "lockly"
+DOMAIN = "lockly_cloud"
 
 CONF_EMAIL = "email"
 CONF_PASSWORD = "password"

@@ -1,4 +1,4 @@
-"""Binary sensor platform for the Lockly integration."""
+"""Binary sensor platform for the Lockly Cloud integration."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ class LocklyDoorSensor(CoordinatorEntity[LocklyCoordinator], BinarySensorEntity)
     ) -> None:
         super().__init__(coordinator)
         self._lock = lock
-        self._attr_unique_id = f"lockly_{lock.id}_door"
+        self._attr_unique_id = f"lockly_cloud_{lock.id}_door"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, lock.id)},
         )

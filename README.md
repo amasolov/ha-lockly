@@ -1,9 +1,13 @@
-# Lockly for Home Assistant
+# Lockly Cloud for Home Assistant
 
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 
 Control a **Lockly Secure Pro** smart lock via the Lockly cloud API. Uses REST
 authentication and MQTT for real-time state updates and lock/unlock commands.
+
+> **Note:** This integration uses the domain `lockly_cloud` and can coexist with
+> [bharat/homeassistant-lockly](https://github.com/bharat/homeassistant-lockly),
+> which uses the `lockly` domain for Zigbee2MQTT PIN slot management.
 
 ## Entities
 
@@ -28,18 +32,18 @@ authentication and MQTT for real-time state updates and lock/unlock commands.
 
 1. Open **HACS > Integrations > three-dot menu > Custom repositories**
 2. Add `https://github.com/amasolov/ha-lockly` as type **Integration**
-3. Search for **Lockly** and click **Download**
+3. Search for **Lockly Cloud** and click **Download**
 4. Restart Home Assistant
 
 ### Manual
 
-Copy `custom_components/lockly/` into your Home Assistant
+Copy `custom_components/lockly_cloud/` into your Home Assistant
 `config/custom_components/` folder, then restart.
 
 ## Setup
 
 1. Go to **Settings > Devices & Services > Add Integration**
-2. Search for **Lockly**
+2. Search for **Lockly Cloud**
 3. Enter your Lockly account email and password
 4. The integration discovers all locks on your account and creates entities for each
 

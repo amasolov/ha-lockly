@@ -1,6 +1,6 @@
 {
-  "domain": "lockly",
-  "name": "Lockly",
+  "domain": "lockly_cloud",
+  "name": "Lockly Cloud",
   "codeowners": ["@amasolov"],
   "config_flow": true,
   "dependencies": [],
