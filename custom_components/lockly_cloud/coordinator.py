@@ -222,9 +222,16 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 state = DeviceState(device_id=lock.id)
                 self.device_states[lock.id] = state
             state.lock_state = "locked" if do_lock else "unlocked"
-            self._update_data()
+            self._prev_lock_states[lock.id] = state.lock_state
+
+            self._set_synthetic_event(lock.id)
 
             _LOGGER.info("Successfully sent %s to %s", action_str, lock.name)
+
+            self.hass.async_create_background_task(
+                self._fetch_events_for_devices([lock.uuid or lock.id]),
+                "lockly_cloud_event_fetch_after_cmd",
+            )
 
     async def _fetch_initial_states(self) -> None:
         """Query each lock via MQTT to populate initial state."""
