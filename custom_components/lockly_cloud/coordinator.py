@@ -482,7 +482,7 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             try:
                 for lock in self.locks:
                     now_ms = int(time_mod.time() * 1000)
-                    lookback = 3600_000 if first_run else (
+                    lookback = 86_400_000 if first_run else (
                         EVENT_LOG_POLL_INTERVAL * 2 * 1000
                     )
                     query_id = lock.uuid or lock.id
