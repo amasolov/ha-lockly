@@ -11,10 +11,12 @@ import base64
 import logging
 from typing import Any
 
+from datetime import datetime, timedelta, timezone
+
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from pylockly import DeviceState, DoorLock, LocklyAPI, LocklyMqtt
+from pylockly import DeviceState, DoorLock, LockEvent, LocklyAPI, LocklyMqtt
 from pylockly.ble_cmd import (
     build_lock_command,
     build_query_status_command,
@@ -24,6 +26,8 @@ from pylockly.ble_cmd import (
 from pylockly.exceptions import LocklyError
 
 from .const import MQTT_RECONNECT_INTERVAL, STATUS_POLL_INTERVAL
+
+EVENT_LOG_POLL_INTERVAL = 60
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,8 +48,11 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.mqtt = LocklyMqtt()
         self.locks: list[DoorLock] = []
         self.device_states: dict[str, DeviceState] = {}
+        self.lock_events: dict[str, list[LockEvent]] = {}
+        self._last_event_ids: dict[str, int] = {}
         self._mqtt_task: asyncio.Task[None] | None = None
         self._poll_task: asyncio.Task[None] | None = None
+        self._event_poll_task: asyncio.Task[None] | None = None
         self._command_lock = asyncio.Lock()
 
     async def async_setup(self) -> None:
@@ -75,12 +82,15 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._poll_status_loop(), "lockly_cloud_status_poll"
         )
 
+        self._event_poll_task = self.hass.async_create_background_task(
+            self._poll_event_log_loop(), "lockly_cloud_event_poll"
+        )
+
     async def async_shutdown(self) -> None:
         """Clean up connections."""
-        if self._poll_task and not self._poll_task.done():
-            self._poll_task.cancel()
-        if self._mqtt_task and not self._mqtt_task.done():
-            self._mqtt_task.cancel()
+        for task in (self._poll_task, self._event_poll_task, self._mqtt_task):
+            if task and not task.done():
+                task.cancel()
         await self.mqtt.disconnect()
         await self.api.close()
 
@@ -219,11 +229,17 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 if parsed.get("is_locked") is not None:
                     state.lock_state = "locked" if parsed["is_locked"] else "unlocked"
+                if parsed.get("battery_pct") is not None:
+                    state.battery = parsed["battery_pct"]
+                if parsed.get("door_open") is not None:
+                    state.door_state = "open" if parsed["door_open"] else "closed"
 
                 _LOGGER.info(
-                    "Initial state for %s: %s",
+                    "Initial state for %s: lock=%s battery=%s%% door=%s",
                     lock.name,
-                    state.lock_state or "partial",
+                    state.lock_state or "?",
+                    state.battery if state.battery is not None else "?",
+                    state.door_state or "?",
                 )
             except asyncio.CancelledError:
                 return
@@ -302,6 +318,49 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return
             except Exception:
                 _LOGGER.exception("Unexpected error in status poll")
+
+    async def _poll_event_log_loop(self) -> None:
+        """Periodically query lock event logs for new unlock events."""
+        await asyncio.sleep(10)
+        while True:
+            if self.mqtt.connected:
+                now = datetime.now(timezone.utc)
+                start = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                for lock in self.locks:
+                    try:
+                        resp = await self.mqtt.query_event_log(
+                            lock.id, start, end, offset=0, limit=10
+                        )
+                        events = LockEvent.from_log_response(resp.payload)
+                        last_seen = self._last_event_ids.get(lock.id, 0)
+                        new_events = [
+                            e for e in events if e.event_id > last_seen
+                        ]
+                        if new_events:
+                            self.lock_events[lock.id] = new_events
+                            self._last_event_ids[lock.id] = max(
+                                e.event_id for e in new_events
+                            )
+                            _LOGGER.debug(
+                                "%d new event(s) for %s",
+                                len(new_events),
+                                lock.name,
+                            )
+                            self._update_data()
+                    except asyncio.CancelledError:
+                        return
+                    except Exception:
+                        _LOGGER.debug(
+                            "Event log poll failed for %s",
+                            lock.name,
+                            exc_info=True,
+                        )
+            try:
+                await asyncio.sleep(EVENT_LOG_POLL_INTERVAL)
+            except asyncio.CancelledError:
+                return
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data (called by DataUpdateCoordinator if update_interval is set)."""
