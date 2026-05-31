@@ -65,11 +65,15 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 self._schedule_mqtt_reconnect()
 
+        self._update_data()
+
+        self.hass.async_create_background_task(
+            self._fetch_initial_states(), "lockly_cloud_initial_states"
+        )
+
         self._poll_task = self.hass.async_create_background_task(
             self._poll_status_loop(), "lockly_cloud_status_poll"
         )
-
-        self._update_data()
 
     async def async_shutdown(self) -> None:
         """Clean up connections."""
@@ -167,6 +171,68 @@ class LocklyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             action = "locked" if do_lock else "unlocked"
             _LOGGER.info("Successfully %s %s", action, lock.name)
+
+    async def _fetch_initial_states(self) -> None:
+        """Query each lock via MQTT to populate initial state."""
+        if not self.mqtt.connected:
+            _LOGGER.debug("MQTT not connected; skipping initial state fetch")
+            return
+
+        await asyncio.sleep(2)
+
+        for lock in self.locks:
+            try:
+                mc = lock.master_code
+                uuid_hex = lock.uuid or lock.id
+                aes_key = derive_aes_key(mc, uuid_hex)
+                tz = lock.timezone or None
+
+                query_cmd = build_query_status_command(
+                    mc, uuid_hex, is_hub=True, tz_name=tz
+                )
+                _LOGGER.debug("Fetching initial state for %s", lock.name)
+                resp = await self.mqtt.send_lock_command(lock.id, query_cmd)
+
+                resp_b64 = resp.payload.get("commandContent", "")
+                if not resp_b64:
+                    _LOGGER.warning(
+                        "Empty query response for %s; initial state unavailable",
+                        lock.name,
+                    )
+                    continue
+
+                resp_bytes = base64.b64decode(resp_b64)
+                parsed = parse_ble_response(resp_bytes, aes_key=aes_key)
+
+                if parsed.get("is_error"):
+                    _LOGGER.warning(
+                        "Query error for %s: 0x%02x",
+                        lock.name,
+                        parsed.get("error_code", 0),
+                    )
+                    continue
+
+                state = self.device_states.get(lock.id)
+                if state is None:
+                    state = DeviceState(device_id=lock.id)
+                    self.device_states[lock.id] = state
+
+                if parsed.get("is_locked") is not None:
+                    state.lock_state = "locked" if parsed["is_locked"] else "unlocked"
+
+                _LOGGER.info(
+                    "Initial state for %s: %s",
+                    lock.name,
+                    state.lock_state or "partial",
+                )
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                _LOGGER.warning(
+                    "Failed to fetch initial state for %s", lock.name, exc_info=True
+                )
+
+        self._update_data()
 
     @callback
     def _handle_device_state(self, states: list[DeviceState]) -> None:
